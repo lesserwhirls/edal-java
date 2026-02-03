@@ -45,7 +45,7 @@ import javax.naming.Name;
 import javax.naming.spi.ObjectFactory;
 
 import org.apache.sis.geometry.DirectPosition2D;
-import org.apache.sis.metadata.sql.util.Initializer;
+import org.apache.sis.metadata.sql.internal.shared.Initializer;
 import org.apache.sis.metadata.iso.extent.DefaultGeographicBoundingBox;
 import org.apache.sis.referencing.CRS;
 import org.apache.sis.referencing.CommonCRS;
