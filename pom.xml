@@ -262,11 +262,11 @@
         <!-- use the following if you're not using a snapshot version. -->
         <repository>
             <id>unidata-releases</id>
-            <url>https://artifacts.unidata.ucar.edu/repository/unidata-releases/</url>
+            <url>https://artifacts.unidata.ucar.edu/releases/</url>
         </repository>
         <snapshotRepository>
             <id>unidata-snapshots</id>
-            <url>https://artifacts.unidata.ucar.edu/repository/unidata-snapshots/</url>
+            <url>https://artifacts.unidata.ucar.edu/snapshots/</url>
         </snapshotRepository>
     </distributionManagement>
     <modules>
