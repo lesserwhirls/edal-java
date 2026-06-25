@@ -37,13 +37,9 @@ import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import net.sf.ehcache.Cache;
-import net.sf.ehcache.Element;
-import net.sf.ehcache.config.CacheConfiguration;
-import net.sf.ehcache.config.CacheConfiguration.TransactionalMode;
-import net.sf.ehcache.config.PersistenceConfiguration;
-import net.sf.ehcache.config.PersistenceConfiguration.Strategy;
-import net.sf.ehcache.store.MemoryStoreEvictionPolicy;
+import org.ehcache.Cache;
+import org.ehcache.config.builders.CacheConfigurationBuilder;
+import org.ehcache.config.builders.ResourcePoolsBuilder;
 import uk.ac.rdg.resc.edal.cache.EdalCache;
 import uk.ac.rdg.resc.edal.dataset.HZTDataSource.MeshCoordinates3D;
 import uk.ac.rdg.resc.edal.exceptions.DataReadingException;
@@ -115,9 +111,9 @@ public abstract class HorizontalMesh4dDataset
         MeshDatasetCacheElement meshDatasetCacheElement;
 
         MeshCacheKey key = new MeshCacheKey(targetGrid, grid);
-        if (meshDatasetCache.isKeyInCache(key)) {
-            meshDatasetCacheElement = (MeshDatasetCacheElement) meshDatasetCache.get(key)
-                    .getObjectValue();
+        MeshDatasetCacheElement cached = meshDatasetCache.get(key);
+        if (cached != null) {
+            meshDatasetCacheElement = cached;
             outputCoords = meshDatasetCacheElement.getOutputCoords();
             coordsToRead = meshDatasetCacheElement.getCoordsToRead();
         } else {
@@ -132,7 +128,7 @@ public abstract class HorizontalMesh4dDataset
                 coordsToRead.add(meshCoords);
             }
             meshDatasetCacheElement = new MeshDatasetCacheElement(outputCoords, coordsToRead);
-            meshDatasetCache.put(new Element(key, meshDatasetCacheElement));
+            meshDatasetCache.put(key, meshDatasetCacheElement);
         }
 
         /*
@@ -230,10 +226,7 @@ public abstract class HorizontalMesh4dDataset
      */
     private static final String CACHE_NAME = "meshDatasetCache";
     private static final int MAX_HEAP_ENTRIES = 50;
-    private static final MemoryStoreEvictionPolicy EVICTION_POLICY = MemoryStoreEvictionPolicy.LFU;
-    private static final Strategy PERSISTENCE_STRATEGY = Strategy.NONE;
-    private static final TransactionalMode TRANSACTIONAL_MODE = TransactionalMode.OFF;
-    private static Cache meshDatasetCache = null;
+    private static final Cache<MeshCacheKey, MeshDatasetCacheElement> meshDatasetCache;
 
     private static class MeshCacheKey {
         private HorizontalGrid target;
@@ -251,7 +244,7 @@ public abstract class HorizontalMesh4dDataset
             int result = 1;
             result = prime * result + ((source == null) ? 0 : source.hashCode());
             result = prime * result + ((target == null) ? 0 : target.hashCode());
-            return result;
+            return EdalCache.murmur3Finalize(result);
         }
 
         @Override
@@ -278,20 +271,17 @@ public abstract class HorizontalMesh4dDataset
     }
 
     static {
-        if (EdalCache.cacheManager.cacheExists(CACHE_NAME) == false) {
-            /*
-             * Configure cache
-             */
+        Cache<MeshCacheKey, MeshDatasetCacheElement> existing = EdalCache.cacheManager
+                .getCache(CACHE_NAME, MeshCacheKey.class, MeshDatasetCacheElement.class);
+        if (existing == null) {
             log.debug("Creating meshDatasetCache, with maximum " + MAX_HEAP_ENTRIES + " entries");
-            CacheConfiguration config = new CacheConfiguration(CACHE_NAME, MAX_HEAP_ENTRIES)
-                    .eternal(true).memoryStoreEvictionPolicy(EVICTION_POLICY)
-                    .persistence(new PersistenceConfiguration().strategy(PERSISTENCE_STRATEGY))
-                    .transactionalMode(TRANSACTIONAL_MODE);
-            meshDatasetCache = new Cache(config);
-            EdalCache.cacheManager.addCache(meshDatasetCache);
+            meshDatasetCache = EdalCache.cacheManager.createCache(CACHE_NAME,
+                    CacheConfigurationBuilder.newCacheConfigurationBuilder(MeshCacheKey.class,
+                            MeshDatasetCacheElement.class,
+                            ResourcePoolsBuilder.heap(MAX_HEAP_ENTRIES)));
         } else {
             log.debug("Loading existing meshDatasetCache");
-            meshDatasetCache = EdalCache.cacheManager.getCache(CACHE_NAME);
+            meshDatasetCache = existing;
         }
     }
 }

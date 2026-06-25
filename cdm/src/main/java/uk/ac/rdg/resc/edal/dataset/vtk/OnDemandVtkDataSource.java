@@ -42,13 +42,9 @@ import javax.xml.stream.XMLStreamReader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import net.sf.ehcache.Cache;
-import net.sf.ehcache.Element;
-import net.sf.ehcache.config.CacheConfiguration;
-import net.sf.ehcache.config.PersistenceConfiguration;
-import net.sf.ehcache.config.CacheConfiguration.TransactionalMode;
-import net.sf.ehcache.config.PersistenceConfiguration.Strategy;
-import net.sf.ehcache.store.MemoryStoreEvictionPolicy;
+import org.ehcache.Cache;
+import org.ehcache.config.builders.CacheConfigurationBuilder;
+import org.ehcache.config.builders.ResourcePoolsBuilder;
 import uk.ac.rdg.resc.edal.cache.EdalCache;
 import uk.ac.rdg.resc.edal.dataset.DataSource;
 import uk.ac.rdg.resc.edal.dataset.vtk.HydromodelVtkDatasetFactory.TimestepInfo;
@@ -68,9 +64,10 @@ public class OnDemandVtkDataSource implements DataSource {
          */
         Number[] data1d;
         DataCacheKey key = new DataCacheKey(timestepInfo.file, variableId);
-        if (vtkGridDatasetCache.isKeyInCache(key)) {
+        Number[] cached = vtkGridDatasetCache.get(key);
+        if (cached != null) {
             log.debug("Getting timestep data from cache");
-            data1d = (Number[]) vtkGridDatasetCache.get(key).getObjectValue();
+            data1d = cached;
         } else {
             log.debug("Data not in cache, reading from VTK file: "
                     + timestepInfo.file.getAbsolutePath());
@@ -138,7 +135,7 @@ public class OnDemandVtkDataSource implements DataSource {
                 if (dataStr != null) {
                     data1d = VtkUtils.parseDataString(dataStr, dataFormat, dataType,
                             timestepInfo.fillValues);
-                    vtkGridDatasetCache.put(new Element(key, data1d));
+                    vtkGridDatasetCache.put(key, data1d);
                 } else {
                     throw new DataReadingException("No data for variable " + variableId
                             + " found in file: " + timestepInfo.file);
@@ -164,27 +161,19 @@ public class OnDemandVtkDataSource implements DataSource {
      */
     private static final String CACHE_NAME = "vtkDataCache";
     private static final int MAX_HEAP_ENTRIES = 50;
-    private static final MemoryStoreEvictionPolicy EVICTION_POLICY = MemoryStoreEvictionPolicy.LFU;
-    private static final Strategy PERSISTENCE_STRATEGY = Strategy.NONE;
-    private static final TransactionalMode TRANSACTIONAL_MODE = TransactionalMode.OFF;
-    private static Cache vtkGridDatasetCache = null;
+    private static final Cache<DataCacheKey, Number[]> vtkGridDatasetCache;
 
     static {
-        if (EdalCache.cacheManager.cacheExists(CACHE_NAME) == false) {
-            /*
-             * Configure cache
-             */
-            log.debug(
-                    "Creating vtkDataCache, with maximum " + MAX_HEAP_ENTRIES + " entries");
-            CacheConfiguration config = new CacheConfiguration(CACHE_NAME, MAX_HEAP_ENTRIES)
-                    .eternal(true).memoryStoreEvictionPolicy(EVICTION_POLICY)
-                    .persistence(new PersistenceConfiguration().strategy(PERSISTENCE_STRATEGY))
-                    .transactionalMode(TRANSACTIONAL_MODE);
-            vtkGridDatasetCache = new Cache(config);
-            EdalCache.cacheManager.addCache(vtkGridDatasetCache);
+        Cache<DataCacheKey, Number[]> existing = EdalCache.cacheManager.getCache(CACHE_NAME,
+                DataCacheKey.class, Number[].class);
+        if (existing == null) {
+            log.debug("Creating vtkDataCache, with maximum " + MAX_HEAP_ENTRIES + " entries");
+            vtkGridDatasetCache = EdalCache.cacheManager.createCache(CACHE_NAME,
+                    CacheConfigurationBuilder.newCacheConfigurationBuilder(DataCacheKey.class,
+                            Number[].class, ResourcePoolsBuilder.heap(MAX_HEAP_ENTRIES)));
         } else {
             log.debug("Loading existing vtkGridDatasetCache");
-            vtkGridDatasetCache = EdalCache.cacheManager.getCache(CACHE_NAME);
+            vtkGridDatasetCache = existing;
         }
     }
 
@@ -204,7 +193,7 @@ public class OnDemandVtkDataSource implements DataSource {
             int result = 1;
             result = prime * result + ((file == null) ? 0 : file.hashCode());
             result = prime * result + ((varId == null) ? 0 : varId.hashCode());
-            return result;
+            return EdalCache.murmur3Finalize(result);
         }
 
         @Override

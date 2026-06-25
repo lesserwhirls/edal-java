@@ -54,7 +54,7 @@ public class WmsContextListener implements ServletContextListener {
         /*
          * Shut down all cache threads
          */
-        EdalCache.cacheManager.shutdown();
+        EdalCache.cacheManager.close();
         
         /*
          * TODO Close any DB connections

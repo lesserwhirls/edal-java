@@ -30,13 +30,9 @@ package uk.ac.rdg.resc.edal.dataset;
 
 import java.util.List;
 
-import net.sf.ehcache.Cache;
-import net.sf.ehcache.Element;
-import net.sf.ehcache.config.CacheConfiguration;
-import net.sf.ehcache.config.CacheConfiguration.TransactionalMode;
-import net.sf.ehcache.config.PersistenceConfiguration;
-import net.sf.ehcache.config.PersistenceConfiguration.Strategy;
-import net.sf.ehcache.store.MemoryStoreEvictionPolicy;
+import org.ehcache.Cache;
+import org.ehcache.config.builders.CacheConfigurationBuilder;
+import org.ehcache.config.builders.ResourcePoolsBuilder;
 import uk.ac.rdg.resc.edal.cache.EdalCache;
 import uk.ac.rdg.resc.edal.grid.GridCell2D;
 import uk.ac.rdg.resc.edal.grid.HorizontalGrid;
@@ -114,8 +110,9 @@ public class Domain2DMapper extends DomainMapper<int[]> {
      */
     public static Domain2DMapper forGrid(HorizontalGrid sourceGrid, final HorizontalGrid targetGrid) {
         Domain2DMapperCacheKey key = new Domain2DMapperCacheKey(sourceGrid, targetGrid);
-        if (domainMapperCache.isKeyInCache(key)) {
-            return (Domain2DMapper) domainMapperCache.get(key).getObjectValue();
+        Domain2DMapper cached = domainMapperCache.get(key);
+        if (cached != null) {
+            return cached;
         }
         Domain2DMapper ret;
         if (sourceGrid instanceof RectilinearGrid
@@ -140,7 +137,7 @@ public class Domain2DMapper extends DomainMapper<int[]> {
              */
             ret = forGeneralGrids(sourceGrid, targetGrid);
         }
-        domainMapperCache.put(new Element(key, ret));
+        domainMapperCache.put(key, ret);
         return ret;
     }
 
@@ -225,27 +222,20 @@ public class Domain2DMapper extends DomainMapper<int[]> {
      */
     private static final String CACHE_NAME = "domainMapperCache";
     private static final int MAX_HEAP_ENTRIES = 100;
-    private static final MemoryStoreEvictionPolicy EVICTION_POLICY = MemoryStoreEvictionPolicy.LFU;
-    private static final Strategy PERSISTENCE_STRATEGY = Strategy.NONE;
-    private static final TransactionalMode TRANSACTIONAL_MODE = TransactionalMode.OFF;
-    private static Cache domainMapperCache;
+    private static final Cache<Domain2DMapperCacheKey, Domain2DMapper> domainMapperCache;
 
     static {
-        if (EdalCache.cacheManager.cacheExists(CACHE_NAME) == false) {
-            /*
-             * Configure cache
-             */
-            log.debug("Creating domainMapperCache, with maximum "+MAX_HEAP_ENTRIES+" entries");
-            CacheConfiguration config = new CacheConfiguration(CACHE_NAME, MAX_HEAP_ENTRIES)
-                    .eternal(true)
-                    .memoryStoreEvictionPolicy(EVICTION_POLICY)
-                    .persistence(new PersistenceConfiguration().strategy(PERSISTENCE_STRATEGY))
-                    .transactionalMode(TRANSACTIONAL_MODE);
-            domainMapperCache = new Cache(config);
-            EdalCache.cacheManager.addCache(domainMapperCache);
+        Cache<Domain2DMapperCacheKey, Domain2DMapper> existing = EdalCache.cacheManager
+                .getCache(CACHE_NAME, Domain2DMapperCacheKey.class, Domain2DMapper.class);
+        if (existing == null) {
+            log.debug("Creating domainMapperCache, with maximum " + MAX_HEAP_ENTRIES + " entries");
+            domainMapperCache = EdalCache.cacheManager.createCache(CACHE_NAME,
+                    CacheConfigurationBuilder.newCacheConfigurationBuilder(
+                            Domain2DMapperCacheKey.class, Domain2DMapper.class,
+                            ResourcePoolsBuilder.heap(MAX_HEAP_ENTRIES)));
         } else {
             log.debug("Loading existing domainMapperCache");
-            domainMapperCache = EdalCache.cacheManager.getCache(CACHE_NAME);
+            domainMapperCache = existing;
         }
     }
 
@@ -265,7 +255,7 @@ public class Domain2DMapper extends DomainMapper<int[]> {
             int result = 1;
             result = prime * result + ((source == null) ? 0 : source.hashCode());
             result = prime * result + ((target == null) ? 0 : target.hashCode());
-            return result;
+            return EdalCache.murmur3Finalize(result);
         }
 
         @Override

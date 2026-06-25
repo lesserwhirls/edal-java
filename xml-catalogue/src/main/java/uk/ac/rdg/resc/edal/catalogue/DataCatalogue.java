@@ -28,9 +28,11 @@
 
 package uk.ac.rdg.resc.edal.catalogue;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.Serializable;
-import java.lang.management.ManagementFactory;
+import java.net.MalformedURLException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -40,24 +42,22 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-import javax.management.MBeanServer;
-import javax.management.MalformedObjectNameException;
-import javax.management.ObjectName;
-
+import org.ehcache.Cache;
+import org.ehcache.CacheManager;
+import org.ehcache.config.CacheConfiguration;
+import org.ehcache.config.ResourceType;
+import org.ehcache.config.SizedResourcePool;
+import org.ehcache.config.builders.CacheConfigurationBuilder;
+import org.ehcache.config.builders.CacheManagerBuilder;
+import org.ehcache.config.builders.ExpiryPolicyBuilder;
+import org.ehcache.config.builders.ResourcePoolsBuilder;
+import org.ehcache.config.units.MemoryUnit;
+import org.ehcache.expiry.ExpiryPolicy;
+import org.ehcache.xml.XmlConfiguration;
 import org.joda.time.DateTime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import net.sf.ehcache.Cache;
-import net.sf.ehcache.CacheManager;
-import net.sf.ehcache.Element;
-import net.sf.ehcache.config.CacheConfiguration;
-import net.sf.ehcache.config.CacheConfiguration.TransactionalMode;
-import net.sf.ehcache.config.MemoryUnit;
-import net.sf.ehcache.config.PersistenceConfiguration;
-import net.sf.ehcache.config.PersistenceConfiguration.Strategy;
-import net.sf.ehcache.management.ManagementService;
-import net.sf.ehcache.store.MemoryStoreEvictionPolicy;
 import uk.ac.rdg.resc.edal.cache.EdalCache;
 import uk.ac.rdg.resc.edal.catalogue.jaxb.CacheInfo;
 import uk.ac.rdg.resc.edal.catalogue.jaxb.CatalogueConfig;
@@ -94,14 +94,10 @@ public class DataCatalogue implements DatasetCatalogue, DatasetStorage, FeatureC
     private static final String CACHE_NAME = "featureCache";
     private static final long CACHE_SIZE_MB = 512;
     private static final int LIFETIME_SECONDS = 0;
-    final MemoryStoreEvictionPolicy EVICTION_POLICY = MemoryStoreEvictionPolicy.LFU;
-    private static final Strategy PERSISTENCE_STRATEGY = Strategy.NONE;
-    private static final TransactionalMode TRANSACTIONAL_MODE = TransactionalMode.OFF;
 
     private boolean cachingEnabled;
-    private Cache featureCache = null;
-    private static MBeanServer mBeanServer;
-    private static ObjectName cacheManagerObjectName;
+    @SuppressWarnings("rawtypes")
+    private Cache<CacheKey, Collection> featureCache = null;
 
     protected final CatalogueConfig config;
     protected Map<String, Dataset> datasets;
@@ -139,36 +135,48 @@ public class DataCatalogue implements DatasetCatalogue, DatasetStorage, FeatureC
         if (ehcache_file != null && !ehcache_file.isEmpty()) {
             /*
              * We want to load the caches from the XML file into the EDAL cache
-             * manager
+             * manager. Ehcache 3 loads XML configurations through
+             * XmlConfiguration; we transfer each cache definition into the
+             * shared EDAL CacheManager so the rest of EDAL sees them.
              */
             log.debug("Loading cache definitions from file");
-            CacheManager cacheManager = CacheManager.newInstance(System.getProperty(WMS_CACHE_CONFIG));
-            for (String cacheName : cacheManager.getCacheNames()) {
-                if(EdalCache.cacheManager.cacheExists(cacheName)) {
-                    /*
-                     * Remove any existing cache
-                     */
-                    EdalCache.cacheManager.removeCache(cacheName);
+            try {
+                XmlConfiguration xmlConfig = new XmlConfiguration(
+                        new File(ehcache_file).toURI().toURL());
+                for (String cacheName : xmlConfig.getCacheConfigurations().keySet()) {
+                    if (EdalCache.cacheManager.getRuntimeConfiguration()
+                            .getCacheConfigurations().containsKey(cacheName)) {
+                        /*
+                         * Remove any existing cache
+                         */
+                        EdalCache.cacheManager.removeCache(cacheName);
+                    }
+                    EdalCache.cacheManager.createCache(cacheName,
+                            xmlConfig.getCacheConfigurations().get(cacheName));
                 }
-                EdalCache.cacheManager.addCache(new Cache(cacheManager.getCache(cacheName).getCacheConfiguration()));
+            } catch (MalformedURLException e) {
+                throw new EdalException("Invalid ehcache.config path: " + ehcache_file, e);
             }
-            cacheManager.shutdown();
         }
 
         if (cachingEnabled) {
-            if (EdalCache.cacheManager.cacheExists(CACHE_NAME)) {
+            @SuppressWarnings("rawtypes")
+            Cache<CacheKey, Collection> existing = EdalCache.cacheManager.getCache(CACHE_NAME,
+                    CacheKey.class, Collection.class);
+            if (existing != null) {
                 /*
                  * Use parameters for featureCache from ehcache.xml config file
-                 * if passed in as JVM parameter wmsCache.config - Update cache
-                 * params in NwcmsConfig
+                 * if passed in as JVM parameter ehcache.config - Update cache
+                 * params in CatalogueConfig
                  */
-                featureCache = EdalCache.cacheManager.getCache(CACHE_NAME);
+                featureCache = existing;
                 CacheInfo catalogueCacheInfo = config.getCacheSettings();
-                CacheConfiguration featureCacheConfiguration = featureCache.getCacheConfiguration();
-                catalogueCacheInfo.setInMemorySizeMB(
-                        (int) (featureCacheConfiguration.getMaxBytesLocalHeap() / (1024 * 1024)));
-                catalogueCacheInfo.setElementLifetimeMinutes(
-                        featureCacheConfiguration.getTimeToLiveSeconds() / 60);
+                CacheConfiguration<?, ?> featureCacheConfiguration = EdalCache.cacheManager
+                        .getRuntimeConfiguration().getCacheConfigurations().get(CACHE_NAME);
+                catalogueCacheInfo
+                        .setInMemorySizeMB((int) getHeapSizeMB(featureCacheConfiguration));
+                catalogueCacheInfo
+                        .setElementLifetimeMinutes(getTtlSeconds(featureCacheConfiguration) / 60f);
                 catalogueCacheInfo.setEnabled(true);
             } else {
                 /*
@@ -176,34 +184,60 @@ public class DataCatalogue implements DatasetCatalogue, DatasetStorage, FeatureC
                  * define "featureCache". In this case, configure with values
                  * from config.xml
                  */
-                CacheConfiguration cacheConfig = new CacheConfiguration(CACHE_NAME, 0)
-                        .eternal(cacheLifetimeSeconds == 0).timeToLiveSeconds(cacheLifetimeSeconds)
-                        .maxBytesLocalHeap(config.getCacheSettings().getInMemorySizeMB(),
-                                MemoryUnit.MEGABYTES)
-                        .memoryStoreEvictionPolicy(EVICTION_POLICY)
-                        .persistence(new PersistenceConfiguration().strategy(PERSISTENCE_STRATEGY))
-                        .transactionalMode(TRANSACTIONAL_MODE);
-
-                featureCache = new Cache(cacheConfig);
-                EdalCache.cacheManager.addCache(featureCache);
-            }
-
-            /*
-             * Used to gather statistics about Ehcache
-             */
-            mBeanServer = ManagementFactory.getPlatformMBeanServer();
-            try {
-                cacheManagerObjectName = new ObjectName("net.sf.ehcache:type=CacheManager,name="
-                        + EdalCache.cacheManager.getName());
-            } catch (MalformedObjectNameException e) {
-                throw new EdalException("unable to form cacheManager ObjectName", e);
-            }
-
-            if (!mBeanServer.isRegistered(cacheManagerObjectName)) {
-                ManagementService.registerMBeans(EdalCache.cacheManager, mBeanServer, true, true,
-                        true, true);
+                featureCache = createFeatureCache(config.getCacheSettings().getInMemorySizeMB(),
+                        cacheLifetimeSeconds);
             }
         }
+    }
+
+    /**
+     * Creates the feature cache in the shared {@link EdalCache#cacheManager}
+     * with the specified heap size (MB) and time-to-live (seconds; 0 means
+     * never expire).
+     */
+    @SuppressWarnings("rawtypes")
+    private static Cache<CacheKey, Collection> createFeatureCache(long sizeMB,
+            long lifetimeSeconds) {
+        CacheConfigurationBuilder<CacheKey, Collection> builder = CacheConfigurationBuilder
+                .newCacheConfigurationBuilder(CacheKey.class, Collection.class,
+                        ResourcePoolsBuilder.newResourcePoolsBuilder().heap(sizeMB, MemoryUnit.MB));
+        if (lifetimeSeconds <= 0) {
+            builder = builder.withExpiry(ExpiryPolicyBuilder.noExpiration());
+        } else {
+            builder = builder.withExpiry(ExpiryPolicyBuilder
+                    .timeToLiveExpiration(Duration.ofSeconds(lifetimeSeconds)));
+        }
+        return EdalCache.cacheManager.createCache(CACHE_NAME, builder);
+    }
+
+    private static long getHeapSizeMB(CacheConfiguration<?, ?> cacheConfiguration) {
+        if (cacheConfiguration == null) {
+            return 0;
+        }
+        SizedResourcePool heap = cacheConfiguration.getResourcePools()
+                .getPoolForResource(ResourceType.Core.HEAP);
+        if (heap == null) {
+            return 0;
+        }
+        org.ehcache.config.units.MemoryUnit unit = (org.ehcache.config.units.MemoryUnit) heap
+                .getUnit();
+        return unit.toBytes(heap.getSize()) / (1024 * 1024);
+    }
+
+    private static long getTtlSeconds(CacheConfiguration<?, ?> cacheConfiguration) {
+        if (cacheConfiguration == null) {
+            return 0;
+        }
+        @SuppressWarnings({ "unchecked", "rawtypes" })
+        ExpiryPolicy<Object, Object> expiry = (ExpiryPolicy) cacheConfiguration.getExpiryPolicy();
+        if (expiry == null) {
+            return 0;
+        }
+        Duration ttl = expiry.getExpiryForCreation(null, null);
+        if (ttl == null || ExpiryPolicy.INFINITE.equals(ttl)) {
+            return 0;
+        }
+        return ttl.getSeconds();
     }
 
     public CatalogueConfig getConfig() {
@@ -222,19 +256,15 @@ public class DataCatalogue implements DatasetCatalogue, DatasetStorage, FeatureC
      *            <code>null</code>
      */
     public void setCache(CacheInfo cacheConfig) {
-        MemoryStoreEvictionPolicy memoryStoreEviction;
-        Strategy persistenceStrategy;
-        TransactionalMode transactionalMode;
-        long cacheSizeMB;
         long configCacheSizeMB = cacheConfig.getInMemorySizeMB();
-        long lifetimeSeconds;
         long configLifetimeSeconds = (long) (cacheConfig.getElementLifetimeMinutes() * 60);
 
+        CacheConfiguration<?, ?> currentConfig = EdalCache.cacheManager.getRuntimeConfiguration()
+                .getCacheConfigurations().get(CACHE_NAME);
         if (featureCache != null && cachingEnabled == cacheConfig.isEnabled()
-                && configCacheSizeMB == featureCache.getCacheConfiguration().getMaxBytesLocalHeap()
-                        / (1024 * 1024)
-                && configLifetimeSeconds == featureCache.getCacheConfiguration()
-                        .getTimeToLiveSeconds()) {
+                && currentConfig != null
+                && configCacheSizeMB == getHeapSizeMB(currentConfig)
+                && configLifetimeSeconds == getTtlSeconds(currentConfig)) {
             /*
              * We are not changing anything about the cache.
              */
@@ -244,77 +274,54 @@ public class DataCatalogue implements DatasetCatalogue, DatasetStorage, FeatureC
         cachingEnabled = cacheConfig.isEnabled();
 
         if (cachingEnabled) {
-            if (EdalCache.cacheManager.cacheExists(CACHE_NAME)) {
-                /*
-                 * Update cache configuration
-                 */
-                CacheConfiguration featureCacheConfig = featureCache.getCacheConfiguration();
-                featureCacheConfig.setTimeToLiveSeconds(configLifetimeSeconds);
-                featureCacheConfig.setMaxBytesLocalHeap(configCacheSizeMB * 1024 * 1024);
-            } else {
-                /*-
-                 * Precedence:
-                 * - Admin config
-                 * - XML file "ehcache.config"
-                 * - Default values
-                 */
+            /*-
+             * Ehcache 3 cache configurations are immutable, so any
+             * resize/TTL change is implemented by removing and recreating
+             * the cache.
+             *
+             * Precedence:
+             * - Admin config
+             * - XML file "ehcache.config"
+             * - Default values
+             */
 
-                /*
-                 * Default values
-                 */
-                cacheSizeMB = CACHE_SIZE_MB;
-                lifetimeSeconds = LIFETIME_SECONDS;
-                memoryStoreEviction = EVICTION_POLICY;
-                persistenceStrategy = PERSISTENCE_STRATEGY;
-                transactionalMode = TRANSACTIONAL_MODE;
+            /*
+             * Default values
+             */
+            long cacheSizeMB = CACHE_SIZE_MB;
+            long lifetimeSeconds = LIFETIME_SECONDS;
 
-                /*
-                 * XML config
-                 */
-                String ehcache_file = System.getProperty("ehcache.config");
-                if (ehcache_file != null && !ehcache_file.isEmpty()) {
-                    Cache tmpfeatureCache = EdalCache.cacheManager.getCache(CACHE_NAME);
-                    cacheSizeMB = tmpfeatureCache.getCacheConfiguration().getMaxBytesLocalHeap()
-                            / (1024 * 1024);
-                    lifetimeSeconds = tmpfeatureCache.getCacheConfiguration()
-                            .getTimeToLiveSeconds();
-                    memoryStoreEviction = tmpfeatureCache.getCacheConfiguration()
-                            .getMemoryStoreEvictionPolicy();
-                    persistenceStrategy = tmpfeatureCache.getCacheConfiguration()
-                            .getPersistenceConfiguration().getStrategy();
-                    transactionalMode = tmpfeatureCache.getCacheConfiguration()
-                            .getTransactionalMode();
-                }
-
-                /*
-                 * Admin
-                 */
-                if (cacheConfig.getInMemorySizeMB() != 0) {
-                    cacheSizeMB = configCacheSizeMB;
-                }
-                if (cacheConfig.getElementLifetimeMinutes() != 0) {
-                    lifetimeSeconds = configLifetimeSeconds;
-                }
-
-                /*
-                 * Configure and create cache
-                 */
-                CacheConfiguration config = new CacheConfiguration(CACHE_NAME, 0)
-                        .eternal(lifetimeSeconds == 0)
-                        .maxBytesLocalHeap(cacheSizeMB, MemoryUnit.MEGABYTES)
-                        .timeToLiveSeconds(lifetimeSeconds)
-                        .memoryStoreEvictionPolicy(memoryStoreEviction)
-                        .persistence(new PersistenceConfiguration().strategy(persistenceStrategy))
-                        .transactionalMode(transactionalMode);
-
-                featureCache = new Cache(config);
-                EdalCache.cacheManager.addCache(featureCache);
+            /*
+             * XML config: pull values from the existing (XML-loaded)
+             * featureCache, if it is currently registered.
+             */
+            if (currentConfig != null) {
+                cacheSizeMB = getHeapSizeMB(currentConfig);
+                lifetimeSeconds = getTtlSeconds(currentConfig);
             }
+
+            /*
+             * Admin
+             */
+            if (cacheConfig.getInMemorySizeMB() != 0) {
+                cacheSizeMB = configCacheSizeMB;
+            }
+            if (cacheConfig.getElementLifetimeMinutes() != 0) {
+                lifetimeSeconds = configLifetimeSeconds;
+            }
+
+            if (currentConfig != null) {
+                EdalCache.cacheManager.removeCache(CACHE_NAME);
+            }
+            featureCache = createFeatureCache(cacheSizeMB, lifetimeSeconds);
         } else {
             /*
              * Remove existing cache to free up memory
              */
-            EdalCache.cacheManager.removeCache(CACHE_NAME);
+            if (currentConfig != null) {
+                EdalCache.cacheManager.removeCache(CACHE_NAME);
+            }
+            featureCache = null;
         }
     }
 
@@ -351,15 +358,22 @@ public class DataCatalogue implements DatasetCatalogue, DatasetStorage, FeatureC
         /*
          * If we have any tiles in the cache with this dataset ID, we want to remove them.
          */
-        if(cachingEnabled) {
-            @SuppressWarnings("rawtypes")
-            List keys = featureCache.getKeys();
-            for(Object key : keys) {
-                CacheKey cacheKey = (CacheKey) key;
+        if (cachingEnabled && featureCache != null) {
+            /*
+             * Ehcache 3 caches are Iterable<Cache.Entry<K,V>>; collect keys to
+             * a temporary list before removing to avoid concurrent modification.
+             */
+            List<CacheKey> toRemove = new ArrayList<>();
+            for (@SuppressWarnings("rawtypes")
+            Cache.Entry<CacheKey, Collection> entry : featureCache) {
+                CacheKey cacheKey = entry.getKey();
                 String datasetId = layerNameMapper.getDatasetIdFromLayerName(cacheKey.layerName);
-                if(dataset.getId().equals(datasetId)) {
-                    featureCache.remove(cacheKey);
+                if (dataset.getId().equals(datasetId)) {
+                    toRemove.add(cacheKey);
                 }
+            }
+            for (CacheKey cacheKey : toRemove) {
+                featureCache.remove(cacheKey);
             }
         }
         /*
@@ -477,20 +491,20 @@ public class DataCatalogue implements DatasetCatalogue, DatasetStorage, FeatureC
             throws EdalException {
         String variable = layerNameMapper.getVariableIdFromLayerName(layerName);
         Collection<? extends DiscreteFeature<?, ?>> mapFeatures;
-        if (cachingEnabled) {
+        if (cachingEnabled && featureCache != null) {
             CacheKey key = new CacheKey(layerName, params);
-            Element element = featureCache.get(key);
+            @SuppressWarnings("rawtypes")
+            Collection cached = featureCache.get(key);
 
-            if (element != null && element.getObjectValue() != null) {
+            if (cached != null) {
                 /*
                  * This is why we added the SuppressWarnings("unchecked").
                  */
-                mapFeatures = (Collection<? extends DiscreteFeature<?, ?>>) element
-                        .getObjectValue();
+                mapFeatures = (Collection<? extends DiscreteFeature<?, ?>>) cached;
             } else {
                 mapFeatures = doExtraction(layerName, variable, params);
                 try {
-                    featureCache.put(new Element(key, mapFeatures));
+                    featureCache.put(key, mapFeatures);
                 } catch (Exception e) {
                     log.error("Problem adding features to cache", e);
                     /*
@@ -514,7 +528,7 @@ public class DataCatalogue implements DatasetCatalogue, DatasetStorage, FeatureC
         return getDatasetFromId(layerNameMapper.getDatasetIdFromLayerName(layerName));
     }
 
-    private static class CacheKey implements Serializable {
+    public static class CacheKey implements Serializable {
         private static final long serialVersionUID = 1L;
         final String layerName;
         final PlottingDomainParams params;
@@ -531,7 +545,7 @@ public class DataCatalogue implements DatasetCatalogue, DatasetStorage, FeatureC
             int result = 1;
             result = prime * result + ((layerName == null) ? 0 : layerName.hashCode());
             result = prime * result + ((params == null) ? 0 : params.hashCode());
-            return result;
+            return EdalCache.murmur3Finalize(result);
         }
 
         @Override

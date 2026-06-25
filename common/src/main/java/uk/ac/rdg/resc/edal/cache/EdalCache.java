@@ -28,40 +28,58 @@
 
 package uk.ac.rdg.resc.edal.cache;
 
-import net.sf.ehcache.CacheManager;
-import net.sf.ehcache.config.Configuration;
-import net.sf.ehcache.config.SizeOfPolicyConfiguration;
+import org.ehcache.CacheManager;
+import org.ehcache.config.builders.CacheManagerBuilder;
 
+/**
+ * Holds the singleton Ehcache 3.x {@link CacheManager} used by EDAL.
+ *
+ * <p>
+ * In Ehcache 2.x the {@code CacheManager} could be configured with a name and a
+ * global "size of policy" (so the cache could be sized by bytes-on-heap rather
+ * than entry count). Ehcache 3.x has a different model: caches are typed
+ * ({@code Cache<K,V>}), and any optional XML configuration is loaded directly
+ * into a {@link CacheManager} via
+ * {@link org.ehcache.xml.XmlConfiguration}. Therefore this class simply
+ * exposes a singleton {@link CacheManager} which can be augmented at runtime by
+ * the various EDAL components (Domain2DMapper, HorizontalMesh4dDataset,
+ * OnDemandVtkDataSource, DataCatalogue, ...).
+ *
+ * <p>
+ * The cached objects are typically large (gridded map features with
+ * 256*256 ~= 65,000 values, or collections of point features containing tens
+ * of thousands of features). Cache sizing for these objects is therefore
+ * handled per-cache, in units of MB on heap, rather than by entry count.
+ */
 public class EdalCache {
-    private static final String CACHE_MANAGER = "EDAL-CacheManager";
-    private static final int MAX_CACHE_DEPTH = 4_000_000;
-
-    /*
-     * We are using an in-memory cache with a configured memory size (as opposed
-     * to a configured number of items in memory). This has the advantage that
-     * we will get a hard limit on the amount of memory the cache consumes. The
-     * disadvantage is that the size of each object needs to be calculated prior
-     * to inserting it into the cache.
-     * 
-     * The maxDepth property specified the maximum number of object references
-     * to count before a warning is given.
-     * 
-     * Now, we are generally caching 2 things:
-     * 
-     * 1) Gridded map features which will generally have 256*256 ~= 65,000
-     * values, but could easily be bigger
-     * 
-     * 2) Collections of point features. A year's worth of EN3 data could
-     * typically contain >15,000 features, each with a number of properties
-     * 
-     * These can need to count a very large number of object references.
-     * However, this calculation is actually pretty quick. Setting the max depth
-     * to 4,000,000 seems to suppress the vast majority of warnings, and doesn't
-     * impact performance noticeably.
-     * 
-     * Cache configuration specified in resources/ehcache.xml
+    /**
+     * The shared, application-wide Ehcache 3 {@link CacheManager}. Caches are
+     * registered against this manager by the various EDAL modules. It is built
+     * (and initialised) eagerly so that callers can rely on it being usable
+     * immediately.
      */
-    public static final CacheManager cacheManager = CacheManager
-            .newInstance(new Configuration().name(CACHE_MANAGER)
-                    .sizeOfPolicy(new SizeOfPolicyConfiguration().maxDepth(MAX_CACHE_DEPTH)));
+    public static final CacheManager cacheManager = CacheManagerBuilder.newCacheManagerBuilder()
+            .build(true);
+
+  /**
+   * The finalization step from MurmurHash3, used to scramble an integer hash
+   * so that the resulting bits are well distributed.
+   *
+   * <p>
+   * This is the same finalizer used by Spring's {@code SimpleKey} (see
+   * <a href="https://github.com/spring-projects/spring-framework/blob/c74f897facf830471e2524252a4f46ded05be895/spring-context/src/main/java/org/springframework/cache/interceptor/SimpleKey.java#L92-L94">SimpleKey.java</a>).
+   * See <a href="https://github.com/Reading-eScience-Centre/edal-java/issues/171#issuecomment-2708650091">
+   * issue #171, comment 2708650091</a> for the discussion that motivated this.
+   *
+   * @param hash the input combined hash code
+   * @return a strongly mixed hash code derived from {@code hash}
+   */
+  public static int murmur3Finalize(int hash) {
+    hash ^= (hash >>> 16);
+    hash *= 0x85ebca6b;
+    hash ^= (hash >>> 13);
+    hash *= 0xc2b2ae35;
+    hash ^= (hash >>> 16);
+    return hash;
+  }
 }
