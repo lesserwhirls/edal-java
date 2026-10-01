@@ -27,8 +27,8 @@
  *******************************************************************************/
 package uk.ac.rdg.resc.edal.grid;
 
-import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 
@@ -63,7 +63,18 @@ public final class LookUpTableGrid extends AbstractCurvilinearGrid {
      *       calculated from these. This means that we could make other large
      *       objects available for garbage collection.
      */
-    private static final Map<CurvilinearCoords, LookUpTableGrid> CACHE = new HashMap<CurvilinearCoords, LookUpTableGrid>();
+    static final int DEFAULT_MAX_CACHE_SIZE = 20;
+    static final int MAX_CACHE_SIZE =
+            Integer.getInteger("edal.lookuptablegrid.cache.size", DEFAULT_MAX_CACHE_SIZE);
+
+    private static final Map<CurvilinearCoords, LookUpTableGrid> CACHE =
+            new LinkedHashMap<CurvilinearCoords, LookUpTableGrid>(MAX_CACHE_SIZE + 1, 1.0f, true) {
+
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<CurvilinearCoords, LookUpTableGrid> eldest) {
+                    return size() > MAX_CACHE_SIZE;
+                }
+            };
     private static final long serialVersionUID = 1L;
 
     private final LookUpTable lut;
@@ -97,6 +108,12 @@ public final class LookUpTableGrid extends AbstractCurvilinearGrid {
     public static void clearCache() {
         synchronized (CACHE) {
             CACHE.clear();
+        }
+    }
+
+    static int getCacheSize() {
+        synchronized (CACHE) {
+            return CACHE.size();
         }
     }
 
